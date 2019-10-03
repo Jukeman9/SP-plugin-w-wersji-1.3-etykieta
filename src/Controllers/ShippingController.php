@@ -12,6 +12,8 @@ use Plenty\Modules\Order\Shipping\Package\Contracts\OrderShippingPackageReposito
 use Plenty\Modules\Order\Shipping\Package\Models\OrderShippingPackage;
 use Plenty\Modules\Order\Shipping\PackageType\Contracts\ShippingPackageTypeRepositoryContract;
 use Plenty\Modules\Order\Shipping\PackageType\Models\ShippingPackageType;
+use Plenty\Modules\Order\Shipping\Returns\Models\RegisterOrderReturnsResponse;
+use Plenty\Modules\Order\Shipping\Returns\Models\SuccessfullyRegisteredOrderReturns;
 use Plenty\Modules\Plugin\Storage\Contracts\StorageRepositoryContract;
 use Plenty\Plugin\ConfigRepository;
 use Plenty\Plugin\Controller;
@@ -58,6 +60,11 @@ class ShippingController extends Controller
      * @var ShippingPackageTypeRepositoryContract
      */
     private $shippingPackageTypeRepositoryContract;
+
+    /**
+     * @var \Plenty\Modules\Item\Variation\Contracts\VariationRepositoryContract
+     */
+    private $variationRepositoryContract;
 
     /**
      * @var  array
@@ -121,7 +128,7 @@ class ShippingController extends Controller
             $shippingPackages = $this->orderShippingPackage->listOrderShippingPackages($orderId);
 
             $this->getLogger(Constants::PLUGIN_NAME)
-                ->info('getLabels::listOrderShippingPackages', $shippingPackages);
+                ->error('getLabels::listOrderShippingPackages', $shippingPackages);
 
             /* @var \Plenty\Modules\Order\Shipping\Package\Models\OrderShippingPackage $shippingPackage */
             foreach ($shippingPackages as $shippingPackage) {
@@ -129,24 +136,148 @@ class ShippingController extends Controller
                 $storageObject = $this->storageRepository->getObject(Constants::PLUGIN_NAME, $storageKey, true);
 
                 $this->getLogger(Constants::PLUGIN_NAME)
-                    ->info('getLabels::$storageObject', $storageObject);
+                    ->error('getLabels::$storageObject', $storageObject);
 
                 $labels[] = $storageObject->body;
             }
         }
         $this->getLogger(Constants::PLUGIN_NAME)
-            ->info('getLabels::$labels', $labels);
+            ->error('getLabels::$labels', $labels);
 
         return $labels;
     }
 
-    /**
-     * Registers shipment(s)
-     *
-     * @param Request $request
-     * @param array $orderIds
-     * @return array
-     */
+    public function registerReturns(Request $request, $orderIds)
+    {
+        $orderIds = $this->getOrderIds($request, $orderIds);
+        /** @var RegisterOrderReturnsResponse $response */
+        $response = pluginApp(RegisterOrderReturnsResponse::class);
+
+        foreach ($orderIds as $orderId) {
+            $order = $this->orderRepository->findOrderById($orderId);
+
+            //inversely than when sending
+            $spSender = $this->prepareSpReceiver($order);
+            $spReceiver = $this->prepareSpSender();
+
+            $shippingPackages = $this->orderShippingPackage->listOrderShippingPackages($order->id);
+            foreach ($shippingPackages as $shippingPackage) {
+
+                $packageType = $this->shippingPackageTypeRepositoryContract->findShippingPackageTypeById($shippingPackage->packageId);
+
+                $requestPackage = $this->prepareRequestPackage($shippingPackage, $packageType, $order);
+
+                // shipping service providers API should be used here
+                $spResponse = $this->courier->createReturn($packageType->name, $requestPackage, $spSender, $spReceiver);
+
+                if ($this->courier->client->getFirstError()) {
+                    $this->getLogger(Constants::PLUGIN_NAME)
+                        ->error('return: SP error response', $this->courier->client->getLastResponse());
+                    break;
+                }
+
+                $spResponse = $spResponse['response'];
+                $responsePackage = $spResponse['packages']['0'];
+
+                $packageId = $responsePackage['package_id'];
+                $externalId = $responsePackage['external_id'];
+                $storageKey = "return_{$packageId}.pdf";
+
+                $label = $responsePackage['labels']['0'];
+                $storageObject = $this->saveLabelToS3(base64_decode($label), $storageKey);
+                $labelUrl = $this->storageRepository->getObjectUrl(Constants::PLUGIN_NAME, $storageKey, true, 60 * 24 * 7);
+
+                $this->getLogger(Constants::PLUGIN_NAME)
+                    ->info(
+                        'return: storage data', [
+                            'storageKey' => $storageKey,
+                            'labelUrl' => $labelUrl,
+                            'storageObject' => $storageObject,
+                            'return_order_id' => $orderId,
+                            'external_id' => $externalId,
+                            'package_id' => $packageId,
+                        ]
+                    );
+
+                /** @var SuccessfullyRegisteredOrderReturns $success */
+                $success = pluginApp(SuccessfullyRegisteredOrderReturns::class);
+
+                $success->setOrderId($orderId);
+                $success->setFileName($storageKey);
+                $success->setLabelBase64($label);
+                $success->setAvailableUntil(date('Y-m-d H:i:s', strtotime(date("Y-m-d", mktime()) . " + 365 day")));
+                $success->setExternalNumber($externalId);
+                $success->setExternalData(
+                    [
+                        'return_order_id' => $orderId,
+                        'url_return_pdf' => $labelUrl,
+                        'external_id' => $externalId,
+                        'package_id' => $packageId,
+                        'package_type' => $packageType->name,
+                    ]
+                );
+
+                $response->addSuccessfullyRegisteredReturns($success);
+            }
+        }
+
+        return $response;
+    }
+
+    public function deleteShipments(Request $request, $orderIds)
+    {
+        $orderIds = $this->getOrderIds($request, $orderIds);
+        foreach ($orderIds as $orderId) {
+            $shippingInformation = $this->shippingInformationRepositoryContract->getShippingInformationByOrderId($orderId);
+
+            $this->getLogger(__METHOD__)
+                ->info('delete: shipment', [
+                    'shipping_info' => $shippingInformation,
+                ]);
+
+            if (isset($shippingInformation->additionalData) && is_array($shippingInformation->additionalData)) {
+                foreach ($shippingInformation->additionalData as $shippingPackage) {
+
+                    $spResponse = $this->courier->cancel($shippingPackage['packageType'], $shippingPackage['packageId']);
+
+                    $this->getLogger(Constants::PLUGIN_NAME)
+                        ->info('delete: SP Response', $spResponse);
+
+                    if ($this->courier->client->getFirstError()) {
+                        break;
+                    }
+                }
+            }
+            if ($this->courier->client->getFirstError()) {
+                $this->getLogger(Constants::PLUGIN_NAME)
+                    ->error('delete: SP Response Error', $this->courier->client->getLastResponse());
+
+                $this->createOrderResult[$orderId] = [
+                    'success' => false,
+                    'message' => $this->courier->client->getFirstError(),
+                    'newPackagenumber' => false,
+                    'packages' => [],
+                ];
+            } else {
+                $this->createOrderResult[$orderId] = $this->buildResultArray(
+                    true,
+                    'Return successfully registered.',
+                    false,
+                    null
+                );
+            }
+
+            // resets the shipping information of current order
+            $this->shippingInformationRepositoryContract->resetShippingInformation($orderId);
+        }
+
+        $this->getLogger(Constants::PLUGIN_NAME)
+            ->info('delete: createOrderResult', $this->createOrderResult);
+
+        // return result array
+        return $this->createOrderResult;
+    }
+
     public function registerShipments(Request $request, $orderIds)
     {
         $orderIds = $this->getOrderIds($request, $orderIds);
@@ -164,12 +295,10 @@ class ShippingController extends Controller
             // gets order shipping packages from current order
             $shippingPackages = $this->orderShippingPackage->listOrderShippingPackages($order->id);
             // iterating through packages
-            /** @var \Plenty\Modules\Order\Shipping\Package\Models\OrderShippingPackage $responsePackage */
+            /** @var \Plenty\Modules\Order\Shipping\Package\Models\OrderShippingPackage $shippingPackage */
             foreach ($shippingPackages as $shippingPackage) {
-                // determine packageType
                 $packageType = $this->shippingPackageTypeRepositoryContract->findShippingPackageTypeById($shippingPackage->packageId);
-
-                $requestPackage = $this->prepareRequestPackage($shippingPackage, $packageType);
+                $spPackage = $this->prepareRequestPackage($shippingPackage, $packageType, $order);
 
                 $this->getLogger(Constants::PLUGIN_NAME)
                     ->info('package data', [
@@ -178,34 +307,38 @@ class ShippingController extends Controller
                         'delivery_address' => $order->deliveryAddress,
                         'sp_sender' => $spSender,
                         'sp_receiver' => $spReceiver,
-                        'sp_package' => $requestPackage,
+                        'sp_package' => $spPackage,
                     ]);
 
 //                // shipping service providers API should be used here
-                $response = $this->courier->createPreRouting($packageType->name, $requestPackage, $spSender, $spReceiver);
+                $spResponse = $this->courier->createPreRouting($packageType->name, $spPackage, $spSender, $spReceiver);
 //
                 if ($this->courier->client->getFirstError()) {
                     break;
                 }
 
-                $response = $response['response'];
-                $responsePackage = $response['packages']['0'];
+                $this->getLogger(Constants::PLUGIN_NAME)
+                    ->info('sp response', $spResponse);
 
-                $shipmentNumber = $responsePackage['external_id'];
-                $storageKey = "{$shipmentNumber}.pdf";
+                $spResponse = $spResponse['response'];
+                $responsePackage = $spResponse['packages']['0'];
+
+                $packageId = $responsePackage['package_id'];
+                $storageKey = "{$packageId}.pdf";
+                $externalId = $responsePackage['external_id'];
 
                 $storageObject = $this->saveLabelToS3(base64_decode($responsePackage['labels']['0']), $storageKey);
                 $labelUrl = $this->storageRepository->getObjectUrl(Constants::PLUGIN_NAME, $storageKey, true, 60 * 24 * 7);
 
                 $packageData = [
-                    'packageNumber' => $shipmentNumber,
+                    'packageNumber' => $externalId,
                     'labelPath' => $storageObject->key,
                 ];
 
                 $this->getLogger(Constants::PLUGIN_NAME)
                     ->info(
                         'storage data', [
-                            '$storageKey' => $storageKey,
+                            'storageKey' => $storageKey,
                             'labelUrl' => $labelUrl,
                             'storageObject' => $storageObject,
                             'packageData' => $packageData,
@@ -216,7 +349,10 @@ class ShippingController extends Controller
 
                 $shipmentItems[] = [
                     'labelUrl' => $labelUrl,
-                    'shipmentNumber' => $shipmentNumber,
+                    'shipmentNumber' => $externalId,
+                    'externalId' => $externalId,
+                    'packageId' => $packageId,
+                    'packageType' => $packageType->name,
                 ];
             }
 
@@ -251,11 +387,6 @@ class ShippingController extends Controller
         return $this->createOrderResult;
     }
 
-    private function insertShipments(Order $order, $shipperAddress, $deliveryAddress, $numberOfParcels, $shipmentDate)
-    {
-
-    }
-
     private function saveShippingInformation($orderId, $shipmentDate, $shipmentItems)
     {
         $data = [
@@ -278,54 +409,6 @@ class ShippingController extends Controller
         $this->getLogger(Constants::PLUGIN_NAME)
             ->info('$shippingInformation', $shippingInformation);
     }
-
-
-//    /**
-//     * Cancels registered shipment(s)
-//     *
-//     * @param Request $request
-//     * @param array $orderIds
-//     * @return array
-//     */
-//    public function deleteShipments(Request $request, $orderIds)
-//    {
-//        $orderIds = $this->getOrderIds($request, $orderIds);
-//        foreach ($orderIds as $orderId) {
-//            $shippingInformation = $this->shippingInformationRepositoryContract->getShippingInformationByOrderId($orderId);
-//
-//            $this->getLogger(__METHOD__)
-//                ->info('delete shipment', $shippingInformation);
-//
-//            if (isset($shippingInformation->additionalData) && is_array($shippingInformation->additionalData)) {
-//                foreach ($shippingInformation->additionalData as $additionalData) {
-//
-//                    $shipmentNumber = $additionalData['shipmentNumber'];
-//
-//                    // use the shipping service provider's API here
-//                    $response = [
-//                        'shipmentNumber' => $shipmentNumber,
-//                        'status' => 'shipment successfully deleted',
-//                    ];
-//
-//                    $this->createOrderResult[$orderId] = $this->buildResultArray(
-//                        true,
-//                        $this->getStatusMessage($response),
-//                        false,
-//                        null);
-//
-//                }
-//
-//                // resets the shipping information of current order
-//                $this->shippingInformationRepositoryContract->resetShippingInformation($orderId);
-//            }
-//
-//
-//        }
-//
-//        // return result array
-//        return $this->createOrderResult;
-//    }
-
 
     /**
      * Returns a formatted status message
@@ -454,19 +537,34 @@ class ShippingController extends Controller
     /**
      * @param \Plenty\Modules\Order\Shipping\Package\Models\OrderShippingPackage $package
      * @param \Plenty\Modules\Order\Shipping\PackageType\Models\ShippingPackageType $packageType
+     * @param \Plenty\Modules\Order\Models\Order $order
      * @return array
      */
-    private function prepareRequestPackage(OrderShippingPackage $package, ShippingPackageType $packageType): array
+    private function prepareRequestPackage(OrderShippingPackage $package, ShippingPackageType $packageType, Order $order): array
     {
         $spPackage = [
             'weight' => $package->weight / 1000,
             'size_l' => $packageType->length,
             'size_w' => $packageType->width,
             'size_d' => $packageType->height,
-            'value' => 10, // for test only
-            'content' => 'Test',
+            'value' => 10, // co tu?
+            'content' => $this->prepareContentString($order),
         ];
 
         return $spPackage;
+    }
+
+    private function prepareContentString(Order $order)
+    {
+        $content = [];
+        /**
+         * @var \Plenty\Modules\Order\Models\OrderItem $item
+         */
+        foreach ($order->orderItems as $item) {
+            $content[] = $item->variation->model;
+        }
+        $content = array_filter($content);
+
+        return $content ? implode(',', $content) : $order->id;
     }
 }

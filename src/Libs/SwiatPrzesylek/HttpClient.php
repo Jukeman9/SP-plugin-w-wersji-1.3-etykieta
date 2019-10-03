@@ -64,18 +64,12 @@ class HttpClient
 
     public function getFirstError()
     {
-        if ($this->response['result'] == self::RESPONSE_FAIL) {
-            $code = $this->response['error']['error_code'] ?? '';
-            $err = $this->response['error']['desc'] ?? 'SP API returned an error';
-            $details = $this->response['error']['details'] ?? [];
-            $details = current(current($details));
-
-            return "<br><br>
-=====<br>
-Error message from operator: <br>
-Code $code: $err <br> 
-$details<br>
-=====";
+        $error = $this->findSpApiError();
+        if (!$error) {
+            $error = $this->findPackageError();
+        }
+        if ($error) {
+            return $this->prepareErrorMessage($error['msg'], $error['details']);
         }
 
         return '';
@@ -104,5 +98,42 @@ $details<br>
         curl_close($ch);
 
         return $output;
+    }
+
+    private function prepareErrorMessage($msg, $details): string
+    {
+        return "<br><br>
+=====<br>
+Error message from operator: <br>
+$msg <br> 
+$details<br>
+=====";
+    }
+
+    private function findSpApiError()
+    {
+        if ($this->response['result'] == self::RESPONSE_FAIL) {
+            $code = $this->response['error']['error_code'] ?? '';
+            $err = $this->response['error']['desc'] ?? 'SP API returned an error';
+            $details = $this->response['error']['details'] ?? [];
+
+            return [
+                'msg' => "Code $code: $err",
+                'details' => current(current($details)),
+            ];
+        }
+    }
+
+    private function findPackageError()
+    {
+        $packages = $this->response['response']['packages'] ?? [];
+        foreach ($packages as $package) {
+            if ($package['result'] == self::RESPONSE_FAIL) {
+                return [
+                    'msg' => "Package: {$package['package_id']}",
+                    'details' => $package['log'],
+                ];
+            }
+        }
     }
 }

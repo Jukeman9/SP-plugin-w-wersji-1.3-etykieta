@@ -1,13 +1,17 @@
-# Release Notes for SwiatPrzesylekPlugin
- 
+# Versionshinweise für SwiatPrzesylekPlugin
+ 
 ## v1.0.0 (2019-07-12)
 
-- Initial release.
+- Erstveröffentlichung.
 
 ## v1.0.1 (2019-08-21)
 
-- Changes in descriptions.
+- Änderungen in den Beschreibungen.
 
-## v1.1.0 (2019-09-11)
+## v1.1.0 (11.09.2019)
 
-- Support for multiple SP API accesses based on the prefix in the package type name.
+- Unterstützung für mehrere SP-API-Zugriffe basierend auf dem Präfix im Pakettypnamen.
+
+## v1.1.1 (2019-09-17)
+
+- Aktualisierte Bedienungsanleitung

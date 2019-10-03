@@ -11,3 +11,7 @@
 ## v1.1.0 (2019-09-11)
 
 - Support for multiple SP API accesses based on the prefix in the package type name.
+
+## v1.1.1 (2019-09-17)
+
+- Updated user guide

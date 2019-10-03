@@ -3,9 +3,11 @@
 namespace SwiatPrzesylek\Providers;
 
 
+use Plenty\Modules\Order\Shipping\Returns\Services\ReturnsServiceProviderService;
 use Plenty\Modules\Order\Shipping\ServiceProvider\Services\ShippingServiceProviderService;
 use Plenty\Plugin\ServiceProvider;
 use SwiatPrzesylek\Constants;
+use SwiatPrzesylek\Controllers\ShippingController;
 
 class SwiatPrzesylekServiceProvider extends ServiceProvider
 {
@@ -18,9 +20,11 @@ class SwiatPrzesylekServiceProvider extends ServiceProvider
 //	     $this->getApplication()->register(ShippingTutorialRouteServiceProvider::class);
     }
 
-    public function boot(ShippingServiceProviderService $shippingServiceProviderService)
+    public function boot(
+        ShippingServiceProviderService $shippingServiceProviderService,
+        ReturnsServiceProviderService $returnsServiceProviderService
+    )
     {
-
         $shippingServiceProviderService->registerShippingProvider(
             Constants::PLUGIN_NAME,
             [
@@ -31,6 +35,13 @@ class SwiatPrzesylekServiceProvider extends ServiceProvider
                 'SwiatPrzesylek\\Controllers\\ShippingController@registerShipments',
                 'SwiatPrzesylek\\Controllers\\ShippingController@deleteShipments',
                 'SwiatPrzesylek\\Controllers\\ShippingController@getLabels',
-            ]);
+            ]
+        );
+
+        $returnsServiceProviderService->registerReturnsProvider(
+            Constants::PLUGIN_NAME,
+            'Świat Przesyłek',
+            ShippingController::class
+        );
     }
 }

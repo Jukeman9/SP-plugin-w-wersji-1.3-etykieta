@@ -25,13 +25,46 @@ class Courier
         $this->client->setApiAccessByPackageType($configRepository, null);
     }
 
+    public function cancel($packageType, $id)
+    {
+        $env = $this->config->get('SwiatPrzesylek.env.type', Constants::ENV_DEV);
+
+        $this->client->setApiAccessByPackageType($this->config, $packageType);
+
+        if ($env == Constants::ENV_DEV) {
+            return 'ok';
+        }
+
+        return $this->client->post('courier/cancel', [
+            'id' => [$id],
+        ]);
+    }
+
+    public function createReturn($packageType, array $package, array $sender, array $receiver)
+    {
+        $env = $this->config->get('SwiatPrzesylek.env.type', Constants::ENV_DEV);
+
+        $this->client->setApiAccessByPackageType($this->config, $packageType);
+
+        if ($env == Constants::ENV_DEV) {
+            return $this->dummyCreatePreRouting();
+        }
+
+        return $this->client->post('courier/create-return', [
+            'package' => $package,
+            'sender' => $sender,
+            'receiver' => $receiver,
+            'options2' => [
+                'label_type' => 'PDF',
+            ],
+        ]);
+    }
+
     public function createPreRouting($packageType, array $package, array $sender, array $receiver, array $options = [])
     {
         $env = $this->config->get('SwiatPrzesylek.env.type', Constants::ENV_DEV);
 
         $this->client->setApiAccessByPackageType($this->config, $packageType);
-//        $this->getLogger(Constants::PLUGIN_NAME)
-//            ->error($this->client->username);
 
         if ($env == Constants::ENV_DEV) {
             return $this->dummyCreatePreRouting();
